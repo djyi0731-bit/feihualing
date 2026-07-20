@@ -428,6 +428,8 @@ function sysSay(){
   const saidText=saidUnit?saidUnit.replace(/(.{6,14})(.)/g,"$1$2<br>"):"";
   addBubble("sys",`（系统）${p.t}·${p.a}<br><span class="sys-poem">${saidText}</span>`);
   showPoem(p);
+  /* 朗读系统接出的诗句 */
+  speak(p.t+"。"+p.a+"。"+saidUnit);
   return p;
 }
 function startGame(){
@@ -594,20 +596,50 @@ function updateTalkBtn(){
   else if(state.running){ b.classList.remove("listening"); lbl.textContent="开始聆听"; }
   else { b.classList.remove("listening"); lbl.textContent="听我说"; }
 }
+
+/* 安全启动语音识别（必须在用户手势内调用才能拉起权限弹窗） */
+function safeStartRecog(){
+  if(!recog) return false;
+  if(listening) return true;          // 已经在听，不必重复
+  try {
+    recog.start();
+    listening = true;
+    return true;
+  } catch(e) {
+    listening = false;
+    continuousMode = false;
+    updateTalkBtn();
+    // 区分：权限被拒 vs 其他错误
+    if (e.name === "NotAllowedError" || String(e.message||"").indexOf("not-allowed") >= 0) {
+      setStatus("麦克风权限未授权 ❌ 请点击浏览器地址栏旁的小锁图标→开启麦克风权限，然后刷新页面");
+    } else {
+      setStatus("语音启动失败：" + (e.message || e.name) + "。请使用手动输入");
+    }
+    showManual(true);
+    return false;
+  }
+}
+
 function startContinuous(){
   if(!recog){ showManual(true); setStatus("当前浏览器不支持语音，请手动输入"); return; }
   if(continuousMode) return;
   continuousMode=true; updateTalkBtn();
-  setStatus("已开启持续聆听，直接说含 <b>"+state.token+"</b> 的诗句…",true);
-  try{ recog.start(); }catch(_){}
+  setStatus("请说出含 <b>"+state.token+"</b> 的诗句…",true);
+  if(!safeStartRecog()) return;       // 权限未授权 → 已显示手动输入框
 }
+
 function pauseListen(){
   if(!continuousMode) return;
-  continuousMode=false; updateTalkBtn();
+  continuousMode=false; listening=false; updateTalkBtn();
   try{ recog.stop(); }catch(_){}
   setStatus('已暂停聆听，点「开始聆听」继续（或手动输入）');
 }
-function stopListen(){ continuousMode=false; listening=false; try{ recog&&recog.stop(); }catch(_){} updateTalkBtn(); }
+
+function stopListen(){
+  continuousMode=false; listening=false;
+  try{ recog&&recog.stop(); }catch(_){}
+  updateTalkBtn();
+}
 
 if(SR){
   recog=new SR(); recog.lang="zh-CN"; recog.continuous=true; recog.interimResults=false; recog.maxAlternatives=1;
@@ -621,14 +653,26 @@ if(SR){
     }
   };
   recog.onerror=e=>{
+    listening=false;
     if(e.error==="not-allowed"||e.error==="service-not-allowed"){
-      continuousMode=false; updateTalkBtn(); setStatus("麦克风权限被拒绝，可手动输入"); showManual(true);
-    } else { setStatus("聆听中…（"+e.error+"）",true); }   // no-speech/aborted/network 等交给 onend 自动重启
+      continuousMode=false; updateTalkBtn();
+      setStatus("麦克风权限被拒绝 ❌ 请刷新页面后重新授权，或使用手动输入"); showManual(true);
+    } else if(e.error==="no-speech"||e.error==="aborted"||e.error==="network"){
+      // 临时错误 → 交给 onend 自动重启
+      setStatus("聆听中…（"+e.error+"）",true);
+    } else {
+      setStatus("语音识别异常："+e.error+"。可手动输入",false);
+    }
   };
   recog.onend=()=>{
+    listening=false;
     if(continuousMode && state.running){
-      try{ recog.start(); }catch(_){ setTimeout(()=>{ try{recog.start();}catch(_){} },300); }   // 自动重启 → 免唤醒持续收音
-    } else { listening=false; updateTalkBtn(); }
+      // 自动重启：免唤醒持续收音。必须尽快重启，否则语音断开
+      setTimeout(()=>{
+        if(!continuousMode||!state.running) return;
+        safeStartRecog();
+      }, 200);
+    } else { updateTalkBtn(); }
   };
 }else{ showManual(true); setStatus("当前浏览器不支持语音，请手动输入"); }
 function showManual(on){ $("#manual").style.display=on?"flex":"none"; }
