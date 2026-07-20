@@ -181,7 +181,7 @@
 
 <script>
 /* ============ 异步加载题库（27MB，不阻塞封面显示） ============ */
-const LIB_VER = "v7";
+const LIB_VER = "v8";
 function loadScript(src, id){
   return new Promise((res,rej)=>{
     const s=document.createElement("script"); s.src=src+"?"+LIB_VER; s.id=id;
@@ -215,14 +215,20 @@ async function initLib(){
   requestAnimationFrame(chunk);
 
   function onReady(){
+    const s=FHLDB.stats();
+    const tk=(window.FHL_TOKENS||[]).length;
+    if(s.poems===0 || tk===0){
+      setCoverInfo("❌ 题库加载失败（可能网络中断），请刷新页面重试");
+      setStatus("题库加载失败，请刷新重试",false);
+      return;   // 不标记可用，避免点「开始」崩溃
+    }
     // IndexedDB 缓存（快速）
     FHLDB.syncRemote(info=>{
       if(info.offline){ setCoverInfo("✅ 离线题库："+info.poems.toLocaleString()+" 首（断网模式）"); return; }
       if(info.done && info.totalAdded>0) setCoverInfo("✅ 题库已扩充至 "+info.poems.toLocaleString()+" 首");
       else if(!info.done) setCoverInfo("⏳ 在线扩充中…"+info.poems.toLocaleString()+" 首");
     });
-    const s=FHLDB.stats();
-    setCoverInfo("✅ 全量题库就绪："+s.poems.toLocaleString()+" 首（唐诗·宋词·宋诗·元曲·诗经）");
+    setCoverInfo("✅ 题库就绪："+s.poems.toLocaleString()+" 首（高频可玩核心集，生僻诗走联网）");
     setStatus('题库 <b>'+s.poems.toLocaleString()+'</b> 首已就绪，点「开始」出题');
     window.__libReady=true;          // 标记可用
   }
@@ -311,6 +317,8 @@ function showPoem(p){
 }
 
 function pickToken(){
+  const TOKENS = window.FHL_TOKENS || [];
+  if(!TOKENS.length){ addVerdict(false,"令字表为空，题库可能未完整加载，请刷新重试"); return; }
   let t; do{ t=TOKENS[Math.floor(Math.random()*TOKENS.length)]; }while(t===state.token && TOKENS.length>1);
   state.token=t; $("#tokenChar").textContent=t;
   const mi=$("#manualInput"); if(mi) mi.placeholder="语音不可用？输入含「"+t+"」的诗句（整联两句），或输入「下一轮」";
