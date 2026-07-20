@@ -448,6 +448,8 @@ function addTtsBreaks(text) {
 
 function speak(text){
   if(!('speechSynthesis' in window) || !text) return;
+  // 兼容：数组→分段链式朗读（中间真的停顿）；字符串→单段朗读
+  if (Array.isArray(text)) return speakSegments(text);
   try{ speechSynthesis.cancel(); }catch(_){}
   const ttsText = addTtsBreaks(text);
   const u=new SpeechSynthesisUtterance(ttsText);
@@ -459,6 +461,34 @@ function speak(text){
   u.volume=1.0;
   const v=pickZhVoice(); if(v) u.voice=v;
   try{ speechSynthesis.speak(u); }catch(_){}
+}
+
+/* 分段朗读：每段一个 SpeechSynthesisUtterance，onend 链式触发下一段
+   TTS 引擎在两段之间会真的停顿，标题/作者/诗句之间有清晰气口 */
+function speakSegments(segments){
+  if(!('speechSynthesis' in window) || !segments || !segments.length) return;
+  try{ speechSynthesis.cancel(); }catch(_){}
+  const voice = pickZhVoice();
+  function build(idx){
+    if (idx >= segments.length) return null;
+    const txt = String(segments[idx] || "").trim();
+    if (!txt) return build(idx+1);
+    const u = new SpeechSynthesisUtterance(txt);
+    u.lang = "zh-CN";
+    u.rate = 0.85;
+    u.pitch = 0.97 + Math.random()*0.06;
+    u.volume = 1.0;
+    if (voice) u.voice = voice;
+    if (idx < segments.length - 1) {
+      u.onend = function(){
+        const next = build(idx+1);
+        if (next) { try{ speechSynthesis.speak(next); }catch(_){} }
+      };
+    }
+    return u;
+  }
+  const first = build(0);
+  if (first) { try{ speechSynthesis.speak(first); }catch(_){} }
 }
 if('speechSynthesis' in window){
   // voice 列表加载完成后清除缓存，确保用到最新的高质量 voice
@@ -483,15 +513,11 @@ function showPoem(p){
   const avatar=p.i
     ? `<img class="pc-avatar" src="assets/${p.i}.jpg" alt="${p.a}" onerror="this.outerHTML='<div class=&quot;pc-badge&quot;>${p.a[0]}</div>'"/>`
     : `<div class="pc-badge">${p.a[0]}</div>`;
-  const picBlock=p.pic
-    ? `<img class="pc-pic" src="assets/${p.pic}" alt="诗词插画" onerror="this.style.display='none'"/>`
-    : `<div class="pc-pic pc-pic-empty">诗词插画位（待 AI 生成）</div>`;
   poemEl.innerHTML=`
     <div class="pc-head">${avatar}
       <div><div class="pc-title">${p.t}</div>
       <div class="pc-meta"><b>${p.a}</b> 〔${p.d}〕</div></div>
     </div>
-    ${picBlock}
     <div class="pc-body">${bodyHtml}</div>
     <div class="pc-src">数据来源：chinese-poetry 开源诗词库（简体）</div>`;
   poemEl.scrollTop=0;
@@ -511,11 +537,14 @@ function sysSay(){
   (p._units||[]).forEach(u=>state.usedLines.add(u));   // 系统展示诗的各联标记已用，防用户照抄
   /* 取这首诗里含当前令字的第一联作为系统"说出"的句子 */
   const saidUnit=(p._units||[]).find(u=>u.includes(state.token))||(p._units||[])[0]||"";
-  const saidText=saidUnit?saidUnit.replace(/(.{6,14})(.)/g,"$1$2<br>"):"";
+  // 气泡显示 + TTS 朗读都按标点断句，让用户视觉上能看到停顿
+  const saidText=saidUnit?addTtsBreaks(saidUnit).replace(/[，。！？；、]/g,"$1<br>"):"";
   addBubble("sys",`（系统）${p.t}·${p.a}<br><span class="sys-poem">${saidText}</span>`);
   showPoem(p);
-  /* 朗读：标题·作者 + 诗句（诗句先走断句再拼接，避免被已有标点短路） */
-  speak(p.t+"。"+p.a+"。"+addTtsBreaks(saidUnit));
+  /* 分段朗读：标题 → 作者 → 诗句各联（每联之间 TTS 真的停顿） */
+  const units = saidUnit ? addTtsBreaks(saidUnit).split(/[，。！？；、]+/).filter(Boolean) : [];
+  const segs = [p.t + "。", p.a + "。"].concat(units);
+  speak(segs);
   return p;
 }
 function startGame(){
