@@ -236,6 +236,7 @@ async function initLib(){
 initLib();   // ← 启动异步加载
 </script>
 
+<script>
 /* 清洗标点/空白（与 FHLDB 内一致） */
 const PUNCT=/[，。、？！,.?!；;：:""''「」『』（）()《》<>—\-…·~～·\s]/g;
 const strip=s=>(s||"").replace(PUNCT,"");
