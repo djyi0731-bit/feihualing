@@ -181,10 +181,10 @@
 
 <script>
 /* ============ 异步加载题库（IndexedDB 缓存 + 进度显示） ============ */
-const LIB_VER = "v10";
+const LIB_VER = "v11";
 const POEMS_URL = "poems.js";
 const POEMS_SIZE_MB = 8;  // 实际 ~7.8MB
-const CACHE_KEY = "fhl_poems_v10";
+const CACHE_KEY = "fhl_poems_v11";
 
 /* IndexedDB 工具：缓存 poems.js 文本（首次慢、之后秒开） */
 const IDB_CACHE = "fhl_cache", IDB_CACHE_STORE = "scripts";
@@ -364,20 +364,106 @@ const WRONG=[
   "emmm，好像不是诗词哦，再接一句？",
   "不对不对，这句诗库里没有，再来！"
 ];
+/* ---- 中文语音选择：按拟人度排序，优先本地高质量 voice ---- */
+let _zhVoice=null;
+let _voicesLoaded=false;
+
 function pickZhVoice(){
   if(!('speechSynthesis' in window)) return null;
-  const vs=speechSynthesis.getVoices()||[];
-  return vs.find(v=>/zh|Chinese|中文|普通话/i.test(v.lang+" "+v.name)) || vs[0] || null;
+  if(_zhVoice) return _zhVoice;   // 缓存命中
+  const all = speechSynthesis.getVoices() || [];
+  if (!all.length) return null;
+
+  // Android Chrome 可能延迟加载 voice 列表（onvoiceschanged 之后再读才全），
+  // 如果当前列表为空或全是默认 voice，标记未加载，下次再试。
+  const hasRealVoice = all.some(v => v.lang && v.name !== "");
+  if (!hasRealVoice) return null;
+
+  // 优先排序：名 → lang → localService
+  const PREFERRED = [
+    "Ting-Ting", "Tingting",       // macOS/iOS 最佳女声
+    "Yaoyao",                       // Windows 10+
+    "Huihui",                       // Windows
+    "Google 普通话", "Google Putonghua",
+    "zh-CN-Wavenet-A", "zh-CN-Wavenet-B",  // Chrome Wavenet
+    "Sin-ji",                       // macOS 粤语但有时也挂 zh-CN
+  ];
+
+  const chineseVoices = all.filter(v =>
+    /^zh|Chinese|中文|普通话/i.test(v.lang + " " + v.name)
+  );
+
+  // 1) 按偏好名匹配
+  for (const pref of PREFERRED) {
+    const found = chineseVoices.find(v =>
+      v.name.toLowerCase().includes(pref.toLowerCase())
+    );
+    if (found) { _zhVoice = found; return found; }
+  }
+
+  // 2) 只要 zh-CN 的（不要 zh-TW/zh-HK 粤语/闽南语，读诗词不准）
+  const zhCN = chineseVoices.filter(v =>
+    v.lang === "zh-CN" || v.lang.startsWith("zh-CN")
+  );
+  if (zhCN.length > 0) {
+    // 优先 localService（本地，不依赖网络）
+    const local = zhCN.find(v => v.localService);
+    _zhVoice = local || zhCN[0];
+    return _zhVoice;
+  }
+
+  // 3) 兜底：任意中文 voice
+  if (chineseVoices.length > 0) {
+    _zhVoice = chineseVoices.find(v => v.localService) || chineseVoices[0];
+    return _zhVoice;
+  }
+
+  return null;
 }
+/* 为无标点诗句自动注入中文标点，让 TTS 有自然停顿 */
+function addTtsBreaks(text) {
+  if (!text) return text;
+  // 已有中文标点的文本直接返回
+  if (/[，。！？；、]/.test(text)) return text;
+  const len = text.length;
+  // 10 字符 → 5+5（五言联）
+  if (len === 10) return text.slice(0, 5) + "，" + text.slice(5) + "。";
+  // 14 字符 → 7+7（七言联）
+  if (len === 14) return text.slice(0, 7) + "，" + text.slice(7) + "。";
+  // 12 字符 → 5+7 或 7+5（杂言）
+  if (len === 12) return text.slice(0, 6) + "，" + text.slice(6) + "。";
+  // 8 字符 → 4+4
+  if (len === 8) return text.slice(0, 4) + "，" + text.slice(4) + "。";
+  // 更长文本：按 7 字符分段加逗号
+  if (len > 14) {
+    const parts = [];
+    for (let i = 0; i < len; i += 7) {
+      parts.push(text.slice(i, i + 7));
+    }
+    return parts.join("，") + "。";
+  }
+  // 短句直接加句号
+  return text + "。";
+}
+
 function speak(text){
   if(!('speechSynthesis' in window) || !text) return;
   try{ speechSynthesis.cancel(); }catch(_){}
-  const u=new SpeechSynthesisUtterance(text);
-  u.lang="zh-CN"; u.rate=1.0; u.pitch=1.0;
+  const ttsText = addTtsBreaks(text);
+  const u=new SpeechSynthesisUtterance(ttsText);
+  u.lang="zh-CN";
+  // 语速比默认稍慢（0.88），诗句念得更从容
+  u.rate=0.88;
+  // 微调语调 ±0.03 模拟真人说话的自然变化
+  u.pitch=0.97 + Math.random()*0.06;
+  u.volume=1.0;
   const v=pickZhVoice(); if(v) u.voice=v;
   try{ speechSynthesis.speak(u); }catch(_){}
 }
-if('speechSynthesis' in window){ speechSynthesis.onvoiceschanged=()=>{}; }
+if('speechSynthesis' in window){
+  // voice 列表加载完成后清除缓存，确保用到最新的高质量 voice
+  speechSynthesis.onvoiceschanged = () => { _zhVoice = null; _voicesLoaded = true; };
+}
 
 function addBubble(who,text){
   const r=document.createElement("div"); r.className="row "+(who==="me"?"me":"sys");
@@ -428,8 +514,8 @@ function sysSay(){
   const saidText=saidUnit?saidUnit.replace(/(.{6,14})(.)/g,"$1$2<br>"):"";
   addBubble("sys",`（系统）${p.t}·${p.a}<br><span class="sys-poem">${saidText}</span>`);
   showPoem(p);
-  /* 朗读系统接出的诗句 */
-  speak(p.t+"。"+p.a+"。"+saidUnit);
+  /* 朗读：标题·作者 + 诗句（诗句先走断句再拼接，避免被已有标点短路） */
+  speak(p.t+"。"+p.a+"。"+addTtsBreaks(saidUnit));
   return p;
 }
 function startGame(){
@@ -439,8 +525,13 @@ function startGame(){
   pickToken();
   addBubble("sys",`本局令字「${state.token}」，我先来——`);
   sysSay();
-  setStatus('请说出含 <b>'+state.token+'</b> 的诗句，已持续聆听');
-  startContinuous();
+  setStatus('请说出含 <b>'+state.token+'</b> 的诗句，点击下方「开始聆听」开启语音');
+  updateTalkBtn();
+  // 【移动端修复】不自动启动麦克风。
+  // 移动浏览器要求 SpeechRecognition.start() 必须在直接用户手势（tap）里调用，
+  // 而从 startGame 到 recog.start 中间会经过 sysSay→speak→TTS 异步播报，
+  // 这个链条太长，移动端会报 NotAllowedError。
+  // 改由用户自己点「开始聆听」按钮，该 tap 是纯净的直接手势。
 }
 
 /* ============ 答对后的「展示 + 等待下一轮」 ============ */
@@ -611,7 +702,13 @@ function safeStartRecog(){
     updateTalkBtn();
     // 区分：权限被拒 vs 其他错误
     if (e.name === "NotAllowedError" || String(e.message||"").indexOf("not-allowed") >= 0) {
-      setStatus("麦克风权限未授权 ❌ 请点击浏览器地址栏旁的小锁图标→开启麦克风权限，然后刷新页面");
+      // 移动端常见：用户拒绝了权限弹窗，或浏览器不支持麦克风
+      const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
+      if (isIOS) {
+        setStatus("iOS Safari 不支持网页语音识别 🍎 请使用手动输入（键盘输入诗句）");
+      } else {
+        setStatus("麦克风权限未授权 ❌ 请点击浏览器地址栏旁的小锁图标→开启麦克风权限，然后点「开始聆听」重试");
+      }
     } else {
       setStatus("语音启动失败：" + (e.message || e.name) + "。请使用手动输入");
     }
