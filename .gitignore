@@ -1,0 +1,6 @@
+# 部署到 GitHub Pages 时排除的非运行文件
+raw/
+android/
+.workbuddy/
+*.tmp
+.__c.js
