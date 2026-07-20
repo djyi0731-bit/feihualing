@@ -180,59 +180,153 @@
 </div>
 
 <script>
-/* ============ 异步加载题库（27MB，不阻塞封面显示） ============ */
-const LIB_VER = "v8";
+/* ============ 异步加载题库（IndexedDB 缓存 + 进度显示） ============ */
+const LIB_VER = "v9";
+const POEMS_URL = "poems.js";
+const POEMS_SIZE_MB = 8;  // 实际 ~7.8MB
+const CACHE_KEY = "fhl_poems_v9";
+
+/* IndexedDB 工具：缓存 poems.js 文本（首次慢、之后秒开） */
+const IDB_CACHE = "fhl_cache", IDB_CACHE_STORE = "scripts";
+function idbCacheOpen(){
+  return new Promise((res, rej) => {
+    if (!("indexedDB" in window)) return rej(new Error("no-idb"));
+    const rq = indexedDB.open(IDB_CACHE, 1);
+    rq.onupgradeneeded = () => { const db = rq.result; if (!db.objectStoreNames.contains(IDB_CACHE_STORE)) db.createObjectStore(IDB_CACHE_STORE, { keyPath: "k" }); };
+    rq.onsuccess = () => res(rq.result);
+    rq.onerror = () => rej(rq.error);
+  });
+}
+async function idbCacheGet(key){
+  try {
+    const db = await idbCacheOpen();
+    return await new Promise(res => {
+      const rq = db.transaction(IDB_CACHE_STORE, "readonly").objectStore(IDB_CACHE_STORE).get(key);
+      rq.onsuccess = () => res(rq.result ? rq.result.v : null);
+      rq.onerror = () => res(null);
+    });
+  } catch (_) { return null; }
+}
+async function idbCacheSet(key, val){
+  try {
+    const db = await idbCacheOpen();
+    await new Promise(res => {
+      const tx = db.transaction(IDB_CACHE_STORE, "readwrite").objectStore(IDB_CACHE_STORE);
+      tx.put({ k: key, v: val, t: Date.now() });
+      tx.transaction.oncomplete = () => res();
+      tx.transaction.onerror = () => res();
+    });
+  } catch (_) {}
+}
+
+/* fetch + 进度 */
+function fetchWithProgress(url, onProgress){
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("GET", url + "?" + LIB_VER, true);
+    xhr.responseType = "text";
+    xhr.onprogress = e => { if (e.lengthComputable && onProgress) onProgress(e.loaded, e.total); };
+    xhr.onload = () => { if (xhr.status >= 200 && xhr.status < 300) resolve(xhr.response); else reject(new Error("HTTP " + xhr.status)); };
+    xhr.onerror = () => reject(new Error("网络错误"));
+    xhr.send();
+  });
+}
+
+/* eval 文本为代码（注入到全局） */
+function evalPoemsScript(code){
+  const s = document.createElement("script");
+  s.text = code;
+  document.head.appendChild(s);
+  document.head.removeChild(s);
+}
+
 function loadScript(src, id){
-  return new Promise((res,rej)=>{
-    const s=document.createElement("script"); s.src=src+"?"+LIB_VER; s.id=id;
-    s.onload=res; s.onerror=()=>rej(new Error("加载失败: "+src));
+  return new Promise((res, rej) => {
+    const s = document.createElement("script"); s.src = src + "?" + LIB_VER; s.id = id;
+    s.onload = res; s.onerror = () => rej(new Error("加载失败: " + src));
     document.head.appendChild(s);
   });
 }
-async function initLib(){
-  setCoverInfo("⏳ 正在下载离线题库（约27MB，首次需数秒）…");
-  try{
-    await loadScript("poems.js","lib-poems");       // 1) 27MB 数据
-    setCoverInfo("⏳ 题库已下载，正在建立索引…");
-    await loadScript("db.js","lib-db");              // 2) 引擎
-  }catch(e){ setCoverInfo("❌ 题库加载失败: "+e.message); return; }
 
-  /* 分片异步建索引（不卡UI）*/
+async function initLib(){
+  // 1) 尝试从 IndexedDB 缓存加载
+  let code = await idbCacheGet(CACHE_KEY);
+  if (code) {
+    setCoverInfo("⏳ 从本地缓存载入题库…");
+    evalPoemsScript(code);
+    if (window.POEM_DB && window.POEM_DB.length) {
+      await loadDbAndIndex();
+      return;
+    }
+    setCoverInfo("⚠️ 缓存损坏，重新下载…");
+    code = null;
+  }
+
+  // 2) 在线下载 + 进度显示
+  setCoverInfo(`⏳ 正在下载离线题库（约 ${POEMS_SIZE_MB}MB，首次需数秒）…`);
+  try {
+    code = await fetchWithProgress(POEMS_URL, (loaded, total) => {
+      const pct = total ? Math.round(loaded / total * 100) : 0;
+      const loadedMB = (loaded / 1024 / 1024).toFixed(1);
+      setCoverInfo(`⏳ 下载题库… ${loadedMB}MB (${pct}%)`);
+    });
+  } catch (e) {
+    setCoverInfo("❌ 题库下载失败: " + e.message + " — 请检查网络后刷新");
+    return;
+  }
+
+  // 3) 写入缓存（后台）
+  idbCacheSet(CACHE_KEY, code);
+  setCoverInfo("⏳ 解析题库…");
+  evalPoemsScript(code);
+  if (!window.POEM_DB || !window.POEM_DB.length) {
+    setCoverInfo("❌ 题库解析失败，文件可能已损坏，请刷新重试");
+    return;
+  }
+
+  await loadDbAndIndex();
+}
+
+async function loadDbAndIndex(){
+  setCoverInfo("⏳ 加载搜索引擎…");
+  try {
+    await loadScript("db.js", "lib-db");
+  } catch (e) {
+    setCoverInfo("❌ 引擎加载失败: " + e.message);
+    return;
+  }
+
+  /* 分片异步建索引（不卡UI） */
   const TOKENS = window.FHL_TOKENS || [];
   FHLDB.setTokens(TOKENS);
   const DB = window.POEM_DB || [];
-  const TOTAL = DB.length, CHUNK = 3000;   // 每批3000首，约30ms/批
+  const TOTAL = DB.length, CHUNK = 3000;
   let done = 0;
   function chunk(){
-    const end = Math.min(done+CHUNK, TOTAL);
+    const end = Math.min(done + CHUNK, TOTAL);
     const slice = DB.slice(done, end);
-    if(slice.length){ FHLDB.addPoems(slice); done = end; }
-    const pct = Math.round(done/TOTAL*100);
-    setCoverInfo("⏳ 正在建立索引… "+done.toLocaleString()+"/"+TOTAL.toLocaleString()+" ("+pct+"%)");
-    if(done < TOTAL){ requestAnimationFrame(chunk); }
+    if (slice.length) { FHLDB.addPoems(slice); done = end; }
+    const pct = Math.round(done / TOTAL * 100);
+    setCoverInfo("⏳ 正在建立索引… " + done.toLocaleString() + "/" + TOTAL.toLocaleString() + " (" + pct + "%)");
+    if (done < TOTAL) { requestAnimationFrame(chunk); }
     else { onReady(); }
   }
   requestAnimationFrame(chunk);
 
   function onReady(){
-    const s=FHLDB.stats();
-    const tk=(window.FHL_TOKENS||[]).length;
-    if(s.poems===0 || tk===0){
+    const s = FHLDB.stats();
+    const tk = (window.FHL_TOKENS || []).length;
+    if (s.poems === 0 || tk === 0) {
       setCoverInfo("❌ 题库加载失败（可能网络中断），请刷新页面重试");
-      setStatus("题库加载失败，请刷新重试",false);
-      return;   // 不标记可用，避免点「开始」崩溃
+      setStatus("题库加载失败，请刷新重试", false);
+      return;
     }
-    // IndexedDB 缓存（快速）
-    FHLDB.syncRemote(info=>{
-      if(info.offline){ setCoverInfo("✅ 离线题库："+info.poems.toLocaleString()+" 首（断网模式）"); return; }
-      if(info.done && info.totalAdded>0) setCoverInfo("✅ 题库已扩充至 "+info.poems.toLocaleString()+" 首");
-      else if(!info.done) setCoverInfo("⏳ 在线扩充中…"+info.poems.toLocaleString()+" 首");
-    });
-    setCoverInfo("✅ 题库就绪："+s.poems.toLocaleString()+" 首（高频可玩核心集，生僻诗走联网）");
-    setStatus('题库 <b>'+s.poems.toLocaleString()+'</b> 首已就绪，点「开始」出题');
-    window.__libReady=true;          // 标记可用
+    setCoverInfo("✅ 题库就绪：" + s.poems.toLocaleString() + " 首（高频可玩核心集，生僻诗走联网）");
+    setStatus('题库 <b>' + s.poems.toLocaleString() + '</b> 首已就绪，点「开始」出题');
+    window.__libReady = true;
   }
 }
+
 initLib();   // ← 启动异步加载
 </script>
 
